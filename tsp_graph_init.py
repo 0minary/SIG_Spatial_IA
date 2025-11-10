@@ -21,12 +21,13 @@ class Lieu:
         self.y = float(y)
         self.nom = str(nom)
 
-    def distance_to(self, autre_lieu):
+# TODO: distance_to should be a method of the Graph class
+    def distance_to(self, another_place):
         """
-        Euclidean distance to another Lieu.
+        Euclidean distance to another place.
         """
-        dx = self.x - autre_lieu.x
-        dy = self.y - autre_lieu.y
+        dx = self.x - another_place.x
+        dy = self.y - another_place.y
         return float(np.hypot(dx, dy))
 
 
@@ -321,23 +322,209 @@ class Affichage:
         self.root.mainloop()
 
 
-if __name__ == "__main__":
-    # Simple demonstration: random generation, sequential route and display
-    g = Graph()
-    g.generer_lieux_aleatoires(nb_lieux=NB_LIEUX, largeur=LARGEUR, hauteur=HAUTEUR, graine=42)
-    g.calcul_matrice_cout_od()
-    route_demo = Route(ordre=None, nombre_lieux=len(g.liste_lieux))
+class TSP_GA:
+    """
+    Résout le TSP par algorithme génétique.
+    Population de routes évoluant par sélection, croisement et mutation.
+    """
 
-    ui = Affichage(g, titre_fenetre="SIG Spatial IA — Groupe DEMO", n_top_routes=5)
-    ui.set_meilleure_route(route_demo)
-    # Example of N best routes (simple variants)
-    variantes = []
-    if len(g.liste_lieux) >= 5:
-        variantes.append(Route([0, 2, 1, 3, 4] + list(range(5, len(g.liste_lieux))) + [0]))
-        variantes.append(Route([0, 1, 3, 2, 4] + list(range(5, len(g.liste_lieux))) + [0]))
-    ui.set_top_routes(variantes)
-    msg = f"Itération: 0 | Meilleure distance: {g.calcul_distance_route(route_demo):.2f}\n"
-    msg += "Raccourcis: 'r' = top routes, 'p' = matrice OD/pheromones, 'ESC' = quitter"
-    ui.set_message(msg)
-    ui.mainloop()
+    def __init__(self, graph, affichage, taille_population=50, taux_mutation=0.01, taux_elitisme=0.1):
+        """
+        Initialise l'algorithme génétique.
+        
+        :param graph: instance de Graph contenant les lieux
+        :param affichage: instance d'Affichage pour la visualisation
+        :param taille_population: nombre d'individus dans la population
+        :param taux_mutation: probabilité de mutation d'un gène
+        :param taux_elitisme: proportion des meilleurs individus conservés
+        """
+        self.graph = graph
+        self.affichage = affichage
+        self.taille_population = int(taille_population)
+        self.taux_mutation = float(taux_mutation)
+        self.nb_elites = max(1, int(taille_population * taux_elitisme))
+        
+        self.population = []  # liste de Route
+        self.meilleure_route = None
+        self.meilleure_distance = float('inf')
+        self.iteration_meilleure = 0
+        self.iteration_courante = 0
+        
+        # Initialisation de la population
+        self._initialiser_population()
+    
+    def _initialiser_population(self):
+        """
+        Crée une population initiale de routes aléatoires.
+        """
+        nb_lieux = len(self.graph.liste_lieux)
+        if nb_lieux < 2:
+            return
+        
+        # Génère des routes aléatoires en permutant les indices (sauf 0)
+        for _ in range(self.taille_population):
+            indices = list(range(1, nb_lieux))
+            random.shuffle(indices)
+            ordre = [0] + indices + [0]
+            self.population.append(Route(ordre))
+        
+        # Évalue la population initiale
+        self._evaluer_population()
+    
+    def _evaluer_population(self):
+        """
+        Calcule la distance de chaque route et trie la population par fitness (distance croissante).
+        """
+        fitness = []
+        for route in self.population:
+            dist = self.graph.calcul_distance_route(route)
+            fitness.append((dist, route))
+        
+        # Tri par distance croissante
+        fitness.sort(key=lambda x: x[0])
+        self.population = [route for _, route in fitness]
+        
+        # Met à jour la meilleure route si amélioration
+        if len(fitness) > 0 and fitness[0][0] < self.meilleure_distance:
+            self.meilleure_distance = fitness[0][0]
+            self.meilleure_route = fitness[0][1]
+            self.iteration_meilleure = self.iteration_courante
+    
+    def _selection_tournoi(self, taille_tournoi=3):
+        """
+        Sélectionne un individu par tournoi: tire aléatoirement taille_tournoi individus
+        et retourne le meilleur.
+        """
+        candidats = random.sample(self.population, min(taille_tournoi, len(self.population)))
+        # Le meilleur a la plus petite distance
+        meilleur = min(candidats, key=lambda r: self.graph.calcul_distance_route(r))
+        return meilleur
+    
+    def _croisement_ox(self, parent1, parent2):
+        """
+        Croisement Order Crossover (OX): préserve l'ordre relatif des gènes.
+        Retourne un enfant.
+        """
+        ordre1 = parent1.ordre[1:-1]  # Sans les 0 de début/fin
+        ordre2 = parent2.ordre[1:-1]
+        
+        if len(ordre1) < 2:
+            return Route([0] + list(ordre1) + [0])
+        
+        # Sélectionne une sous-séquence de parent1
+        point1 = random.randint(0, len(ordre1) - 1)
+        point2 = random.randint(point1, len(ordre1))
+        
+        segment = ordre1[point1:point2]
+        enfant = [None] * len(ordre1)
+        enfant[point1:point2] = segment
+        
+        # Remplit les trous avec les gènes de parent2 dans l'ordre
+        genes_parent2 = [g for g in ordre2 if g not in segment]
+        idx_enfant = 0
+        for gene in genes_parent2:
+            while enfant[idx_enfant] is not None:
+                idx_enfant += 1
+            enfant[idx_enfant] = gene
+        
+        return Route([0] + enfant + [0])
+    
+    def _mutation_swap(self, route):
+        """
+        Mutation par échange: échange deux gènes (hors 0 de début/fin) avec une certaine probabilité.
+        """
+        ordre = route.ordre[1:-1]  # Sans les 0
+        if len(ordre) < 2:
+            return
+        
+        for i in range(len(ordre)):
+            if random.random() < self.taux_mutation:
+                j = random.randint(0, len(ordre) - 1)
+                ordre[i], ordre[j] = ordre[j], ordre[i]
+        
+        route.ordre = [0] + ordre + [0]
+    
+    def _nouvelle_generation(self):
+        """
+        Crée une nouvelle génération par élitisme, croisement et mutation.
+        """
+        nouvelle_pop = []
+        
+        # Élitisme: conserve les meilleurs
+        nouvelle_pop.extend(self.population[:self.nb_elites])
+        
+        # Génère le reste par croisement et mutation
+        while len(nouvelle_pop) < self.taille_population:
+            parent1 = self._selection_tournoi()
+            parent2 = self._selection_tournoi()
+            enfant = self._croisement_ox(parent1, parent2)
+            self._mutation_swap(enfant)
+            nouvelle_pop.append(enfant)
+        
+        self.population = nouvelle_pop
+    
+    def _mettre_a_jour_affichage(self):
+        """
+        Met à jour l'affichage avec la meilleure route et les N meilleures routes.
+        """
+        if self.meilleure_route is not None:
+            self.affichage.set_meilleure_route(self.meilleure_route)
+        
+        # Affiche les N meilleures routes de la population actuelle
+        self.affichage.set_top_routes(self.population[:self.affichage.n_top_routes])
+        
+        # Message d'avancement
+        msg = f"Itération: {self.iteration_courante} | "
+        msg += f"Meilleure distance: {self.meilleure_distance:.2f} | "
+        msg += f"Trouvée à l'itération: {self.iteration_meilleure}\n"
+        msg += "Raccourcis: 'r' = top routes, 'p' = matrice OD, 'ESC' = quitter"
+        self.affichage.set_message(msg)
+    
+    def executer(self, nb_iterations=100, delai_ms=50):
+        """
+        Exécute l'algorithme génétique pour un nombre d'itérations donné.
+        Met à jour l'affichage à chaque itération.
+        
+        :param nb_iterations: nombre de générations
+        :param delai_ms: délai en ms entre chaque itération (pour visualisation)
+        """
+        def iteration():
+            if self.iteration_courante < nb_iterations:
+                self._nouvelle_generation()
+                self._evaluer_population()
+                self.iteration_courante += 1
+                self._mettre_a_jour_affichage()
+                
+                # Planifie la prochaine itération
+                self.affichage.root.after(delai_ms, iteration)
+            else:
+                # Affichage final
+                self._mettre_a_jour_affichage()
+        
+        # Affichage initial
+        self._mettre_a_jour_affichage()
+        
+        # Lance les itérations
+        self.affichage.root.after(delai_ms, iteration)
+        self.affichage.mainloop()
+
+
+if __name__ == "__main__":
+    # Démonstration de l'algorithme génétique
+    g = Graph()
+    
+    # Option 1: Charger depuis un fichier CSV
+    #g.charger_graph("tests/data/graph_5.csv")
+    g.charger_graph("tests/data/graph_20.csv")
+    
+    # Option 2: Génération aléatoire
+    #g.generer_lieux_aleatoires(nb_lieux=NB_LIEUX, largeur=LARGEUR, hauteur=HAUTEUR, graine=42)
+    
+    g.calcul_matrice_cout_od()
+
+    ui = Affichage(g, titre_fenetre="SIG Spatial IA — Groupe 8 — Algorithme Génétique", n_top_routes=5)
+    
+    # Initialise et exécute l'algorithme génétique
+    tsp_ga = TSP_GA(g, ui, taille_population=50, taux_mutation=0.02, taux_elitisme=0.1)
+    tsp_ga.executer(nb_iterations=200, delai_ms=50)
 
