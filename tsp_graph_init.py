@@ -13,7 +13,7 @@ NB_LIEUX = 10
 
 class Lieu:
     """
-    Représente un lieu à visiter, avec ses coordonnées (x, y) et un nom.
+    represent a place to visit, with its coordinates (x, y) and a name.
     """
 
     def __init__(self, x, y, nom):
@@ -23,7 +23,7 @@ class Lieu:
 
     def distance_to(self, autre_lieu):
         """
-        Distance euclidienne à un autre Lieu.
+        Euclidean distance to another Lieu.
         """
         dx = self.x - autre_lieu.x
         dy = self.y - autre_lieu.y
@@ -32,8 +32,8 @@ class Lieu:
 
 class Route:
     """
-    Représente une route (cycle) sur le graphe: ordre des lieux visités.
-    Contrainte: commence et se termine par 0 (lieu de départ).
+    Represent a route (cycle) on the graph: order of the places visited.
+    Constraint: starts and ends with 0 (starting place).
     """
 
     def __init__(self, ordre, nombre_lieux=None):
@@ -46,18 +46,18 @@ class Route:
 
     def _assurer_depart_retour_zero(self):
         """
-        Force la route à commencer et terminer par 0 si possible.
+        Force the route to start and end with 0 if possible.
         """
         if len(self.ordre) == 0:
             self.ordre = [0]
-        # Si le premier n'est pas 0 mais 0 est présent, on fait une rotation
+        # If the first is not 0 but 0 is present, we make a rotation
         if self.ordre[0] != 0 and 0 in self.ordre:
             idx0 = self.ordre.index(0)
             self.ordre = self.ordre[idx0:] + self.ordre[1:idx0 + 1]
-        # Si 0 absent, on l'ajoute au début
+        # If 0 is absent, we add it to the beginning
         if self.ordre[0] != 0:
             self.ordre.insert(0, 0)
-        # Assure la fermeture
+        # Ensure the closure
         if self.ordre[-1] != 0:
             self.ordre.append(0)
 
@@ -67,17 +67,16 @@ class Route:
 
 class Graph:
     """
-    Contient les lieux, la matrice de coûts OD et des utilitaires de calcul.
+    Contains the places, the OD cost matrix and calculation utilities.
     """
 
     def __init__(self):
         self.liste_lieux = []
         self.matrice_od = None
 
-    # ------------ Chargement / génération des lieux ------------
     def generer_lieux_aleatoires(self, nb_lieux=NB_LIEUX, largeur=LARGEUR, hauteur=HAUTEUR, graine=None):
         """
-        Génère aléatoirement des lieux dans les bornes [0, largeur] x [0, hauteur].
+        Generate randomly places in the bounds [0, largeur] x [0, hauteur].
         """
         if graine is not None:
             random.seed(graine)
@@ -90,11 +89,11 @@ class Graph:
 
     def charger_graph(self, chemin_csv):
         """
-        Charge la liste des lieux depuis un CSV.
-        Colonnes attendues (flexible): 'x','y','nom' (insensibles à la casse).
-        Si 'nom' absent, un nom sera généré à partir de l'indice.
+        Load the list of places from a CSV.
+        Expected columns (flexible): 'x','y','nom' (case insensitive).
+        If 'nom' is absent, a name will be generated from the index.
         """
-        # Tentative via pandas si disponible, sinon csv du standard
+        # Try via pandas if available, otherwise csv from the standard
         try:
             import pandas as pd  # autorisé
             df = pd.read_csv(chemin_csv)
@@ -109,7 +108,7 @@ class Graph:
                 nom = (str(ligne[col_nom]) if col_nom else f"Lieu {i}")
                 self.liste_lieux.append(Lieu(ligne[col_x], ligne[col_y], nom))
         except Exception:
-            # Fallback minimaliste avec csv
+            # Fallback minimal with csv
             self.liste_lieux = []
             with open(chemin_csv, newline='', encoding='utf-8') as f:
                 lecteur = csv.DictReader(f)
@@ -124,11 +123,11 @@ class Graph:
                     self.liste_lieux.append(Lieu(ligne[col_x], ligne[col_y], nom))
         self.matrice_od = None
 
-    # ------------ Matrice OD et utilitaires ------------
+    # ------------ OD matrix and utilities ------------
     def calcul_matrice_cout_od(self):
         """
-        Calcule la matrice des distances euclidiennes entre tous les lieux.
-        Stocke le résultat dans self.matrice_od (numpy.ndarray de forme NxN).
+        Calculate the matrix of Euclidean distances between all places.
+        Store the result in self.matrice_od (numpy.ndarray of shape NxN).
         """
         n = len(self.liste_lieux)
         if n == 0:
@@ -142,7 +141,7 @@ class Graph:
 
     def plus_proche_voisin(self, lieu_idx):
         """
-        Renvoie l'indice du lieu le plus proche du lieu 'lieu_idx', via la matrice des distances.
+        Return the index of the place closest to the place 'lieu_idx', via the distance matrix.
         """
         if self.matrice_od is None:
             self.calcul_matrice_cout_od()
@@ -150,26 +149,26 @@ class Graph:
         if n == 0:
             return None
         distances = np.array(self.matrice_od[lieu_idx], dtype=float)
-        distances[lieu_idx] = np.inf  # Exclut soi-même
+        distances[lieu_idx] = np.inf  # Exclude itself
         return int(np.argmin(distances))
 
     def calcul_distance_route(self, route):
         """
-        Calcule la distance totale de la route (somme des arêtes successives).
+        Calculate the total distance of the route (sum of successive edges).
         Utilise la matrice si disponible, sinon calcule à la volée.
         """
         ordre = route.ordre
         if len(ordre) < 2:
             return 0.0
         if self.matrice_od is None or (self.matrice_od.shape[0] != len(self.liste_lieux)):
-            # Calcul direct via les coordonnées
+            # Direct calculation via coordinates
             total = 0.0
             for i in range(len(ordre) - 1):
                 a = self.liste_lieux[ordre[i]]
                 b = self.liste_lieux[ordre[i + 1]]
                 total += a.distance_to(b)
             return float(total)
-        # Utilise la matrice OD
+        # Use the OD matrix
         indices_src = np.array(ordre[:-1], dtype=int)
         indices_dst = np.array(ordre[1:], dtype=int)
         return float(self.matrice_od[indices_src, indices_dst].sum())
@@ -177,14 +176,14 @@ class Graph:
 
 class Affichage:
     """
-    Affichage Tkinter des lieux, de la meilleure route, des N meilleures routes et/ou d'une matrice de coûts.
+    Tkinter display of places, the best route, the N best routes and/or a cost matrix.
     """
 
     COULEUR_LIEU = "#222222"
     COULEUR_TEXTE_LIEU = "#ffffff"
     COULEUR_SELEC = "#1e90ff"
     COULEUR_MEILLEURE_ROUTE = "blue"
-    COULEUR_TOP_ROUTES = "#c0c0c0"  # gris clair
+    COULEUR_TOP_ROUTES = "#c0c0c0"
     RAYON_LIEU = 10
 
     def __init__(self, graph, titre_fenetre="SIG Spatial IA — Groupe à renseigner", n_top_routes=5):
@@ -215,7 +214,7 @@ class Affichage:
         self._dessiner_graph()
         self._redessiner_routes()
 
-    # ------------ Mise à jour des données d'affichage ------------
+    # ------------ Update of the display data ------------
     def set_meilleure_route(self, route):
         self.meilleure_route = route
         self._redessiner_routes()
@@ -232,7 +231,7 @@ class Affichage:
         self.zone_texte.delete("1.0", tk.END)
         self.zone_texte.insert(tk.END, texte)
 
-    # ------------ Gestion des événements ------------
+    # ------------ Event management ------------
     def _on_toggle_routes(self, _evt=None):
         self.afficher_routes = not self.afficher_routes
         self._redessiner_routes()
@@ -241,7 +240,7 @@ class Affichage:
         self.afficher_pheromones = not self.afficher_pheromones
         self._mettre_a_jour_zone_texte_pheromones()
 
-    # ------------ Dessin ------------
+    # ------------ Drawing ------------
     def _dessiner_graph(self):
         self.canvas.delete("all")
         for idx, lieu in enumerate(self.graph.liste_lieux):
@@ -253,14 +252,14 @@ class Affichage:
         self.canvas.update()
 
     def _redessiner_routes(self):
-        # Efface toutes les lignes
+        # Clear all lines
         self.canvas.delete("route")
         self.canvas.delete("ordre")
         if self.afficher_routes:
-            # Dessine N meilleures routes en gris clair
+            # Draw N best routes in light gray
             for route in self.top_routes:
                 self._dessiner_route(route, couleur=self.COULEUR_TOP_ROUTES, dash=(2, 4), tag="route")
-        # Dessine la meilleure route en bleu pointillé
+        # Draw the best route in blue dashed
         if self.meilleure_route is not None:
             self._dessiner_route(self.meilleure_route, couleur=self.COULEUR_MEILLEURE_ROUTE, dash=(6, 4), tag="route")
             self._dessiner_ordre_visite(self.meilleure_route)
@@ -278,11 +277,11 @@ class Affichage:
 
     def _dessiner_ordre_visite(self, route):
         """
-        Affiche l'ordre de visite (0..N-1..) au-dessus de chaque lieu visité pour la meilleure route.
+        Display the visit order (0..N-1..) above each visited place for the best route.
         """
-        # Nettoyage des anciens labels d'ordre
+        # Clean up old order labels
         self.canvas.delete("ordre")
-        # Map lieu -> position de visite (hors dernier 0)
+        # Map place -> visit position (except last 0)
         for position, idx_lieu in enumerate(route.ordre[:-1]):
             lieu = self.graph.liste_lieux[idx_lieu]
             self.canvas.create_text(lieu.x, lieu.y - (self.RAYON_LIEU + 10), text=str(position),
@@ -290,13 +289,13 @@ class Affichage:
 
     def _mettre_a_jour_zone_texte_pheromones(self):
         """
-        Affiche la matrice de coûts/phéromones sous forme textuelle dans la zone de texte.
+        Display the cost/pheromones matrix in text form in the text zone.
         """
         if not self.afficher_pheromones:
             return
         self.zone_texte.delete("1.0", tk.END)
         if self.pheromones is None:
-            # Par défaut, on affiche la matrice OD si disponible
+            # By default, we display the OD matrix if available
             matrice = self.graph.matrice_od
             if matrice is None:
                 self.zone_texte.insert(tk.END, "Aucune matrice à afficher (OD/Phéromones non disponible).")
@@ -311,20 +310,19 @@ class Affichage:
 
     def _inserer_matrice_texte(self, matrice):
         """
-        Formate une matrice (numpy) en texte aligné.
+        Format a matrix (numpy) in aligned text.
         """
         arr = np.array(matrice, dtype=float)
         with np.printoptions(precision=2, suppress=True):
             texte = str(arr)
         self.zone_texte.insert(tk.END, texte)
 
-    # ------------ Boucle principale ------------
     def mainloop(self):
         self.root.mainloop()
 
 
 if __name__ == "__main__":
-    # Démonstration simple: génération aléatoire, route séquentielle et affichage
+    # Simple demonstration: random generation, sequential route and display
     g = Graph()
     g.generer_lieux_aleatoires(nb_lieux=NB_LIEUX, largeur=LARGEUR, hauteur=HAUTEUR, graine=42)
     g.calcul_matrice_cout_od()
@@ -332,7 +330,7 @@ if __name__ == "__main__":
 
     ui = Affichage(g, titre_fenetre="SIG Spatial IA — Groupe DEMO", n_top_routes=5)
     ui.set_meilleure_route(route_demo)
-    # Exemple de N meilleures routes (variantes simples)
+    # Example of N best routes (simple variants)
     variantes = []
     if len(g.liste_lieux) >= 5:
         variantes.append(Route([0, 2, 1, 3, 4] + list(range(5, len(g.liste_lieux))) + [0]))
