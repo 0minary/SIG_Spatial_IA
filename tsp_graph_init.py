@@ -42,12 +42,27 @@ class Route:
     
     def __init__(self, ordre=None, nombre_lieux=None):
         if ordre is not None:
+            # Normaliser: enlever les 0 internes, garder structure [0, ..., 0]
             core = [int(i) for i in list(ordre) if int(i) != 0]
             self.ordre = [0] + core + [0] if core else [0]
         elif nombre_lieux is not None:
             self.ordre = [0] + list(range(1, nombre_lieux)) + [0]
         else:
             self.ordre = [0]
+    
+    def __eq__(self, other):
+        """Égalité: nécessaire pour déduplication (set/dict)"""
+        if not isinstance(other, Route):
+            return NotImplemented
+        return self.ordre == other.ordre
+    
+    def __hash__(self):
+        """Hash: permet set() et dict()"""
+        return hash(tuple(self.ordre))
+    
+    def __repr__(self):
+        """Représentation pour debug"""
+        return f"Route({self.ordre})"
 
 
 class Graph:
@@ -113,7 +128,7 @@ class Graph:
     def calcul_matrice_cout_od(self):
         """
         Calcule la matrice des distances euclidiennes entre tous les lieux.
-        Implémentation optimisée (formule de Gram, tuilage, symétrie, dtype adaptatif).
+        Optimisé pour VM 8GB RAM / 4 cœurs.
         """
         n = len(self.liste_lieux)
         
@@ -121,40 +136,41 @@ class Graph:
             self.matrice_od = np.zeros((0, 0), dtype=np.float64)
             return self.matrice_od
         
-        # Choix adaptatif du dtype selon la taille
-        dtype = np.float32 if n >= 5000 else np.float64
+        dtype = np.float32 if n >= 1000 else np.float64
         itemsize = np.dtype(dtype).itemsize
         
         # Extraction vectorisée des coordonnées (C-contigu)
-        X = np.ascontiguousarray(
-            np.array([[lieu.x, lieu.y] for lieu in self.liste_lieux], dtype=dtype)
-        )
+        X = np.ascontiguousarray(np.array([[lieu.x, lieu.y] for lieu in self.liste_lieux], dtype=dtype))
+
         # Normes au carré ||xi||^2
         s = np.einsum('ij,ij->i', X, X, dtype=dtype)
         
-        # memmap si la matrice dépasse ~512MB
+        # memmap si la matrice dépasse ~2GB (avec 8GB RAM disponible)
+        # Garde ~6GB pour l'OS, Python et le reste du programme
         total_bytes = n * n * itemsize
-        use_memmap = total_bytes > 512 * 1024 * 1024
+        use_memmap = total_bytes > 2 * 1024 * 1024 * 1024
         if use_memmap:
             mmap_path = "matrice_od_mmap.dat"
             D = np.memmap(mmap_path, dtype=dtype, mode="w+", shape=(n, n))
         else:
             D = np.empty((n, n), dtype=dtype)
         
+
+
         # Tuilage (blocs) + symétrie
         block = 1024 if n >= 2048 else (512 if n >= 1024 else n)
         for i0 in range(0, n, block):
             i1 = min(i0 + block, n)
-            Xi = X[i0:i1]      # (bi, 2)
-            si = s[i0:i1]      # (bi,)
+            Xi = X[i0:i1] 
+            si = s[i0:i1] 
             for j0 in range(i0, n, block):
                 j1 = min(j0 + block, n)
-                Xj = X[j0:j1]  # (bj, 2)
-                sj = s[j0:j1]  # (bj,)
+                Xj = X[j0:j1] 
+                sj = s[j0:j1] 
                 
                 # Produit de Gram pour le bloc
-                G = Xi @ Xj.T  # (bi, bj)
-                # dist^2 = si + sj^T - 2G
+                G = Xi @ Xj.T 
+
                 D2 = si[:, None] + sj[None, :] - 2.0 * G
                 # Stabilité numérique et racine
                 np.maximum(D2, 0, out=D2)
@@ -174,12 +190,10 @@ class Graph:
         
         self.matrice_od = D
         return D
-    
+
     def plus_proche_voisin(self, lieu_idx):
         """
         Retourne l'indice du lieu le plus proche de lieu_idx.
-        Utilise la matrice OD (calculée si nécessaire).
-        Optimisé: vectorisation NumPy, cache automatique.
         """
         # Calcule la matrice si absente
         if self.matrice_od is None:
@@ -189,20 +203,85 @@ class Graph:
         if n == 0:
             return None
         
-        # Copie la ligne des distances, exclut soi-même
         distances = self.matrice_od[lieu_idx].copy()
         distances[lieu_idx] = np.inf
         
         return int(np.argmin(distances))
     
+    def construire_route_plus_proche_voisin(self, depart=0):
+        """
+        Construit une route complète avec l'heuristique du plus proche voisin.
+        Utile pour initialisation semi-greedy du GA.
+        
+        :param depart: Indice du lieu de départ (par défaut 0)
+        :return: Route complète construite par PPN
+        """
+        if self.matrice_od is None:
+            self.calcul_matrice_cout_od()
+        
+        n = len(self.liste_lieux)
+        if n == 0:
+            return None
+        
+        ordre = [depart]
+        visites = {depart}
+        
+        # Construit la route lieu par lieu (plus proche non visité)
+        for _ in range(n - 1):
+            dernier = ordre[-1]
+            distances = np.array(self.matrice_od[dernier], dtype=float)
+            
+            # Exclut les lieux déjà visités
+            for idx in visites:
+                distances[idx] = np.inf
+            
+            prochain = int(np.argmin(distances))
+            ordre.append(prochain)
+            visites.add(prochain)
+        
+        # Retour au dépôt (lieu 0)
+        if depart != 0:
+            # Si départ ≠ 0, on reconstruit en commençant par 0
+            idx_zero = ordre.index(0)
+            ordre = ordre[idx_zero:] + ordre[:idx_zero] + [0]
+        else:
+            ordre.append(0)
+        
+        return Route(ordre)
+    
+    def plus_proches_voisins_k(self, lieu_idx, k=20):
+        """
+        Retourne les k indices des lieux les plus proches de lieu_idx.
+        Utilisé pour 2-opt restreint (plus rapide).
+        
+        :param lieu_idx: Indice du lieu de référence
+        :param k: Nombre de voisins à retourner
+        :return: Array des k indices les plus proches
+        """
+        if self.matrice_od is None:
+            self.calcul_matrice_cout_od()
+        
+        n = self.matrice_od.shape[0]
+        if n <= 1 or k <= 0:
+            return np.array([], dtype=int)
+        
+        k = min(k, n - 1)  # Ne peut pas retourner plus que n-1
+        
+        # Copie défensive
+        d = self.matrice_od[lieu_idx].copy()
+        d[lieu_idx] = np.inf  # Exclut soi-même
+        
+        # Utilise argpartition pour extraire les k plus petits (O(n))
+        idx_k = np.argpartition(d, k)[:k]
+        
+        # Trie ces k indices par distance croissante
+        idx_k = idx_k[np.argsort(d[idx_k])]
+        
+        return idx_k
+    
     def calcul_distance_route(self, route):
         """
         Calcule la distance totale d'une route (somme des arêtes successives).
-        
-        Optimisations:
-        - Utilise la matrice OD si disponible (O(K) avec K = longueur route)
-        - Sinon calcul direct via coordonnées (fallback)
-        - Indexation vectorielle NumPy avancée
         """
         ordre = route.ordre
         
@@ -211,13 +290,13 @@ class Graph:
         
         # Vérifie si la matrice OD est utilisable
         if self.matrice_od is None or self.matrice_od.shape[0] != len(self.liste_lieux):
-            # Fallback: calcul direct (plus lent mais sûr)
+            # Fallback: calcul direct (plus lent mais sûr) 
             total = 0.0
             for i in range(len(ordre) - 1):
                 total += self.liste_lieux[ordre[i]].distance(self.liste_lieux[ordre[i + 1]])
             return total
         
-        # Méthode optimisée: indexation vectorielle de la matrice
+        # indexation vectorielle de la matrice
         indices_src = np.array(ordre[:-1], dtype=np.int32)
         indices_dst = np.array(ordre[1:], dtype=np.int32)
         
@@ -237,7 +316,7 @@ class Affichage:
     """
     __slots__ = ('graph', 'n_top_routes', 'top_routes', 'meilleure_route', 
                  'pheromones', 'headless', 'root', 'canvas', 'zone_texte', 
-                 'afficher_routes', 'afficher_pheromones')
+                 'afficher_top_routes', 'afficher_pheromones')
     
     # Constantes d'affichage
     COULEUR_LIEU = "#222222"
@@ -260,7 +339,7 @@ class Affichage:
         self.pheromones = None
         self.headless = headless
         
-        self.afficher_routes = True
+        self.afficher_top_routes = True  # Renommé pour clarté
         self.afficher_pheromones = False
         
         if not self.headless:
@@ -280,8 +359,10 @@ class Affichage:
             
             # Raccourcis clavier
             self.root.bind("<Escape>", lambda e: self.root.destroy())
-            self.root.bind("r", self._on_toggle_routes)
+            self.root.bind("t", self._on_toggle_top_routes)
+            self.root.bind("T", self._on_toggle_top_routes)
             self.root.bind("p", self._on_toggle_pheromones)
+            self.root.bind("P", self._on_toggle_pheromones)
             
             # Affichage initial
             self._dessiner_graph()
@@ -299,8 +380,27 @@ class Affichage:
             self._redessiner_routes()
     
     def set_top_routes(self, routes):
-        """Met à jour les N meilleures routes et redessine."""
-        self.top_routes = list(routes)[:self.n_top_routes]
+        """
+        Met à jour les N meilleures routes et redessine.
+        Filtre pour n'afficher que des routes uniques et différentes de la meilleure.
+        """
+        # Déduplication stricte: ne garder que des routes uniques
+        routes_uniques = []
+        routes_vues = set()
+        
+        # Exclure la meilleure route globale
+        meilleure_tuple = tuple(self.meilleure_route.ordre) if self.meilleure_route else None
+        
+        for route in routes:
+            route_tuple = tuple(route.ordre)
+            # Ajouter seulement si unique ET différente de la meilleure
+            if route_tuple not in routes_vues and route_tuple != meilleure_tuple:
+                routes_uniques.append(route)
+                routes_vues.add(route_tuple)
+                if len(routes_uniques) >= self.n_top_routes:
+                    break
+        
+        self.top_routes = routes_uniques
         if not self.headless:
             self._redessiner_routes()
     
@@ -316,9 +416,11 @@ class Affichage:
             self.zone_texte.delete("1.0", tk.END)
             self.zone_texte.insert(tk.END, texte)
     
-    def _on_toggle_routes(self, _evt=None):
-        """Raccourci 'r': affiche/masque les N meilleures routes."""
-        self.afficher_routes = not self.afficher_routes
+    def _on_toggle_top_routes(self, _evt=None):
+        """Raccourci 'T': affiche/masque les N meilleures routes grises."""
+        self.afficher_top_routes = not self.afficher_top_routes
+        status = "affichées" if self.afficher_top_routes else "masquées"
+        print(f"Routes grises (top {self.n_top_routes}): {status}")
         self._redessiner_routes()
     
     def _on_toggle_pheromones(self, _evt=None):
@@ -353,8 +455,8 @@ class Affichage:
         self.canvas.delete("route")
         self.canvas.delete("ordre")
         
-        # Dessine les N meilleures routes en gris clair
-        if self.afficher_routes:
+        # Dessine les N meilleures routes en gris clair (si activé)
+        if self.afficher_top_routes:
             for route in self.top_routes:
                 self._dessiner_route(route, self.COULEUR_TOP_ROUTES, (2, 4))
         
@@ -429,15 +531,6 @@ class Affichage:
 class TSP_GA:
     """
     Algorithme Génétique pour résoudre le TSP.
-    
-    Optimisations:
-    - __slots__ pour économie mémoire
-    - Vectorisation NumPy pour évaluations batch
-    - Order Crossover (OX) - standard TSP
-    - Swap mutation - ultra rapide
-    - Sélection par tournoi - bon équilibre
-    - Élitisme 10% - préserve meilleures solutions
-    - Update interval ajustable - performance GUI
     """
     __slots__ = ('graph', 'affichage', 'taille_population', 'taux_mutation', 
                  'nb_elites', 'update_interval', 'population', 'meilleure_route',
@@ -473,17 +566,27 @@ class TSP_GA:
     
     def _initialiser_population(self):
         """
-        Crée une population initiale de routes aléatoires.
-        Optimisé: génération vectorisée des permutations.
+        Crée une population initiale semi-greedy: 10% PPN + 90% aléatoire.
+        Améliore la convergence sans perdre la diversité.
         """
         nb_lieux = len(self.graph.liste_lieux)
         if nb_lieux < 2:
             return
         
-        # Génère taille_population permutations aléatoires (sans le lieu 0)
-        indices_base = list(range(1, nb_lieux))
+        # 10% avec heuristique Plus Proche Voisin (convergence rapide)
+        nb_ppn = max(1, int(self.taille_population * 0.10))
+        print(f"  Initialisation: {nb_ppn} routes PPN + {self.taille_population - nb_ppn} routes aléatoires")
         
-        for _ in range(self.taille_population):
+        for i in range(nb_ppn):
+            # Différents points de départ pour diversité
+            depart = i % nb_lieux
+            route_ppn = self.graph.construire_route_plus_proche_voisin(depart)
+            if route_ppn:
+                self.population.append(route_ppn)
+        
+        # 90% routes aléatoires (diversité et exploration)
+        indices_base = list(range(1, nb_lieux))
+        while len(self.population) < self.taille_population:
             indices = indices_base.copy()
             random.shuffle(indices)
             ordre = [0] + indices + [0]
@@ -491,6 +594,7 @@ class TSP_GA:
         
         # Évalue la population initiale
         self._evaluer_population()
+        print(f"  Meilleure distance initiale (PPN): {self.meilleure_distance:.2f}")
     
     def _evaluer_population(self):
         """
@@ -566,23 +670,90 @@ class TSP_GA:
         if len(ordre) < 2:
             return
         
-        # Pour chaque position, probabilité de mutation
-        for i in range(len(ordre)):
-            if random.random() < self.taux_mutation:
-                j = random.randint(0, len(ordre) - 1)
-                ordre[i], ordre[j] = ordre[j], ordre[i]
+        # Mutation plus agressive: au moins 2 swaps pour maintenir diversité
+        nb_swaps = max(2, int(len(ordre) * self.taux_mutation))
+        for _ in range(nb_swaps):
+            i, j = random.sample(range(len(ordre)), 2)
+            ordre[i], ordre[j] = ordre[j], ordre[i]
         
         # Reconstruit la route avec les 0
         route.ordre = [0] + ordre + [0]
     
+    def _amelioration_2opt_knn(self, route, k=20, max_iterations=50):
+        """
+        Amélioration 2-opt restreinte aux k plus proches voisins.
+        Beaucoup plus rapide que 2-opt complet: O(n×k) au lieu de O(n²).
+        
+        :param route: Route à améliorer
+        :param k: Nombre de voisins à considérer (défaut 20)
+        :param max_iterations: Nombre max d'itérations (défaut 50)
+        :return: Route améliorée
+        """
+        if route is None:
+            return route
+        
+        meilleure_route = Route(ordre=route.ordre.copy())
+        meilleure_distance = self.graph.calcul_distance_route(meilleure_route)
+        
+        # Pré-calcul des k plus proches voisins pour chaque lieu
+        n = len(self.graph.liste_lieux)
+        k_voisins = {}
+        for lieu in range(n):
+            k_voisins[lieu] = set(self.graph.plus_proches_voisins_k(lieu, k))
+        
+        ameliore = True
+        iterations = 0
+        
+        while ameliore and iterations < max_iterations:
+            ameliore = False
+            iterations += 1
+            ordre = meilleure_route.ordre[1:-1]  # Sans les 0
+            n_ordre = len(ordre)
+            
+            for i in range(n_ordre - 1):
+                lieu_i = ordre[i]
+                
+                # Ne teste que les j où ordre[j] est dans les k-NN de lieu_i
+                for j in range(i + 2, n_ordre):
+                    lieu_j = ordre[j]
+                    
+                    # Optimisation: teste seulement si proche voisin
+                    if lieu_j not in k_voisins[lieu_i]:
+                        continue
+                    
+                    # Test 2-opt: inverse le segment [i+1:j+1]
+                    nouveau_ordre = ordre[:i+1] + ordre[i+1:j+1][::-1] + ordre[j+1:]
+                    nouvelle_route = Route([0] + nouveau_ordre + [0])
+                    nouvelle_distance = self.graph.calcul_distance_route(nouvelle_route)
+                    
+                    if nouvelle_distance < meilleure_distance - 1e-6:
+                        meilleure_route = nouvelle_route
+                        meilleure_distance = nouvelle_distance
+                        ordre = nouveau_ordre
+                        ameliore = True
+                        break
+                
+                if ameliore:
+                    break
+        
+        return meilleure_route
+    
     def _nouvelle_generation(self):
         """
-        Crée une nouvelle génération via élitisme, croisement et mutation.
+        Crée une nouvelle génération via élitisme, croisement, mutation et immigrants aléatoires.
         """
         nouvelle_pop = []
         
         # Élitisme: conserve les nb_elites meilleures routes
         nouvelle_pop.extend(self.population[:self.nb_elites])
+        
+        # Injecter des immigrants aléatoires (10% de la population) pour maintenir diversité
+        nb_immigrants = max(2, int(self.taille_population * 0.10))
+        nb_lieux = len(self.graph.liste_lieux)
+        for _ in range(nb_immigrants):
+            indices = list(range(1, nb_lieux))
+            random.shuffle(indices)
+            nouvelle_pop.append(Route([0] + indices + [0]))
         
         # Génère le reste par croisement et mutation
         while len(nouvelle_pop) < self.taille_population:
@@ -593,7 +764,7 @@ class TSP_GA:
             # Croisement
             enfant = self._croisement_ox(parent1, parent2)
             
-            # Mutation
+            # Mutation (toujours appliquer pour maintenir diversité)
             self._mutation_swap(enfant)
             
             nouvelle_pop.append(enfant)
@@ -603,7 +774,6 @@ class TSP_GA:
     def _mettre_a_jour_affichage(self):
         """
         Met à jour l'affichage avec les meilleures routes et informations.
-        Optimisé: appel conditionnel selon headless et update_interval.
         """
         if self.affichage.headless:
             return
@@ -622,7 +792,7 @@ class TSP_GA:
         msg += f"Taille population: {self.taille_population} | "
         msg += f"Taux mutation: {self.taux_mutation*100:.1f}% | "
         msg += f"Élites: {self.nb_elites}\n"
-        msg += "Raccourcis: 'r' = top routes, 'p' = matrice OD, 'ESC' = quitter"
+        msg += "Raccourcis: 'T' = toggle routes grises, 'P' = matrice OD, 'ESC' = quitter"
         self.affichage.set_message(msg)
     
     def executer(self, nb_iterations=500, delai_ms=50):
@@ -631,11 +801,6 @@ class TSP_GA:
         
         :param nb_iterations: Nombre de générations à effectuer
         :param delai_ms: Délai en ms entre updates GUI (si pas headless)
-        
-        Optimisations:
-        - Updates GUI conditionnels selon update_interval
-        - Mode headless: exécution synchrone rapide
-        - Mode GUI: exécution asynchrone avec tkinter.after
         """
         if self.affichage.headless:
             # Mode headless: exécution rapide sans GUI
@@ -659,6 +824,17 @@ class TSP_GA:
                     self._evaluer_population()
                     self.iteration_courante += 1
                     
+                    # Amélioration 2-opt k-NN sur la meilleure route (toutes les 20 générations)
+                    if self.iteration_courante % 20 == 0 and self.meilleure_route:
+                        route_amelioree = self._amelioration_2opt_knn(self.meilleure_route, k=20)
+                        distance_amelioree = self.graph.calcul_distance_route(route_amelioree)
+                        if distance_amelioree < self.meilleure_distance:
+                            print(f"  2-opt k-NN amélioration (gen {self.iteration_courante}): {self.meilleure_distance:.2f} → {distance_amelioree:.2f}")
+                            self.meilleure_distance = distance_amelioree
+                            self.meilleure_route = route_amelioree
+                            # IMPORTANT: injecter dans la population pour propagation
+                            self.population[0] = route_amelioree
+                    
                     # Update GUI selon l'intervalle
                     if self.iteration_courante % self.update_interval == 0:
                         self._mettre_a_jour_affichage()
@@ -666,6 +842,16 @@ class TSP_GA:
                     # Planifie la prochaine itération
                     self.affichage.root.after(delai_ms, iteration)
                 else:
+                    # Amélioration finale 2-opt k-NN
+                    if self.meilleure_route:
+                        print("\nAmélioration 2-opt k-NN finale...")
+                        route_amelioree = self._amelioration_2opt_knn(self.meilleure_route, k=30, max_iterations=100)
+                        distance_amelioree = self.graph.calcul_distance_route(route_amelioree)
+                        if distance_amelioree < self.meilleure_distance:
+                            print(f"✓ Amélioration finale: {self.meilleure_distance:.2f} → {distance_amelioree:.2f}")
+                            self.meilleure_distance = distance_amelioree
+                            self.meilleure_route = route_amelioree
+                    
                     # Affichage final
                     self._mettre_a_jour_affichage()
             
@@ -679,37 +865,14 @@ class TSP_GA:
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 if __name__ == "__main__":
     # Démonstration de l'algorithme génétique TSP
     print("=== TSP - Algorithme Génétique ===")
-    print(f"Génération de {NB_LIEUX} lieux aléatoires...")
     
     g = Graph()
     
-    # Option 1: Chargement depuis CSV (décommenter pour utiliser)
     # g.charger_graph("tests/data/graph_5.csv")
     g.charger_graph("tests/data/graph_20.csv")
-    
-    # Option 2: Génération aléatoire
     #g.generer_lieux_aleatoires(nb_lieux=NB_LIEUX, largeur=LARGEUR, hauteur=HAUTEUR, graine=42)
     
     print(f"Calcul de la matrice OD ({len(g.liste_lieux)} lieux)...")
@@ -730,21 +893,18 @@ if __name__ == "__main__":
                   n_top_routes=5, headless=False)
     
     # Création et lancement de l'algorithme génétique
+    # Paramètres optimisés pour VM 8GB RAM / 4 cœurs
     tsp_ga = TSP_GA(
         graph=g,
         affichage=ui,
-        taille_population=10000,     
-        taux_mutation=0.02,        # 2% de mutation
-        taux_elitisme=0.1,         # 5% d'élitisme (top 5 sur 100)
-        update_interval=10         # Update GUI toutes les 10 générations
+        taille_population=1000,      # Bon compromis qualité/RAM (< 10 MB)
+        taux_mutation=0.15,         # 15% pour maintenir diversité
+        taux_elitisme=0.05,         # 5% seulement (moins de convergence)
+        update_interval=5           # Update plus fréquent pour visualisation
     )
-    
-    print(f"Population: {tsp_ga.taille_population} routes")
-    print(f"Élitisme: {tsp_ga.nb_elites} meilleures routes conservées")
-    print(f"Mutation: {tsp_ga.taux_mutation*100:.1f}%")
-    print(f"Meilleure distance initiale: {tsp_ga.meilleure_distance:.2f}")
-    print(f"\nLancement de l'optimisation (500 générations)...")
-    print("Raccourcis: 'r' = top routes, 'p' = matrice OD, 'ESC' = quitter")
-    
-    # Exécute l'algorithme génétique
-    tsp_ga.executer(nb_iterations=1000, delai_ms=50)
+
+    tsp_ga.executer(nb_iterations=600, delai_ms=0)
+
+
+
+
