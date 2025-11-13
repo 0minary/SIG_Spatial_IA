@@ -37,8 +37,10 @@ class Route:
     """
     Représente une route (cycle) visitant tous les lieux.
     Contrainte: commence et se termine par le lieu 0 (dépôt).
+    
+    Implémente les comparaisons pour tri direct par fitness.
     """
-    __slots__ = ('ordre',)
+    __slots__ = ('ordre', '_fitness')
     
     def __init__(self, ordre=None, nombre_lieux=None):
         if ordre is not None:
@@ -49,20 +51,38 @@ class Route:
             self.ordre = [0] + list(range(1, nombre_lieux)) + [0]
         else:
             self.ordre = [0]
+        
+        self._fitness = None  # Cache pour la fitness (distance)
     
     def __eq__(self, other):
-        """Égalité: nécessaire pour déduplication (set/dict)"""
+        """Égalité basée sur la séquence d'ordre"""
         if not isinstance(other, Route):
             return NotImplemented
         return self.ordre == other.ordre
     
-    def __hash__(self):
-        """Hash: permet set() et dict()"""
-        return hash(tuple(self.ordre))
+    def __lt__(self, other):
+        """Inférieur = meilleure fitness (distance plus courte)"""
+        if not isinstance(other, Route):
+            return NotImplemented
+        # Sécurité: retourne False si fitness non calculée (au lieu de raise)
+        if self._fitness is None or other._fitness is None:
+            return False
+        return self._fitness < other._fitness
+    
+    def __gt__(self, other):
+        """Supérieur = pire fitness (distance plus longue)"""
+        if not isinstance(other, Route):
+            return NotImplemented
+        # Sécurité: retourne False si fitness non calculée
+        if self._fitness is None or other._fitness is None:
+            return False
+        return self._fitness > other._fitness
     
     def __repr__(self):
         """Représentation pour debug"""
-        return f"Route({self.ordre})"
+        if self._fitness is not None:
+            return f"Route(dist={self._fitness:.2f}, ordre={self.ordre[:5]}...{self.ordre[-2:]})"
+        return f"Route(ordre={self.ordre[:5]}...{self.ordre[-2:]})"
 
 
 class Graph:
@@ -386,17 +406,17 @@ class Affichage:
         """
         # Déduplication stricte: ne garder que des routes uniques
         routes_uniques = []
-        routes_vues = set()
         
-        # Exclure la meilleure route globale
-        meilleure_tuple = tuple(self.meilleure_route.ordre) if self.meilleure_route else None
-        
+        # Exclure la meilleure route globale (utilise __eq__)
         for route in routes:
-            route_tuple = tuple(route.ordre)
             # Ajouter seulement si unique ET différente de la meilleure
-            if route_tuple not in routes_vues and route_tuple != meilleure_tuple:
+            if self.meilleure_route and route == self.meilleure_route:  # Utilise __eq__ !
+                continue
+            
+            # Vérifie unicité avec __eq__
+            deja_presente = any(route == r for r in routes_uniques)  # Utilise __eq__ !
+            if not deja_presente:
                 routes_uniques.append(route)
-                routes_vues.add(route_tuple)
                 if len(routes_uniques) >= self.n_top_routes:
                     break
         
@@ -595,36 +615,41 @@ class TSP_GA:
         # Évalue la population initiale
         self._evaluer_population()
         print(f"  Meilleure distance initiale (PPN): {self.meilleure_distance:.2f}")
+        print(f"  Top 3: {self.population[0]}, {self.population[1]}, {self.population[2]}")  # Utilise __repr__ !
     
     def _evaluer_population(self):
         """
-        Calcule la distance de chaque route et trie par fitness.
-        Optimisé: vectorisation partielle via liste comprehension.
+        Calcule la fitness de chaque route et trie directement avec __lt__.
+        Utilise les dunders de comparaison pour tri élégant.
         """
-        # Calcul vectorisé des distances
-        fitness = [(self.graph.calcul_distance_route(route), route) 
-                   for route in self.population]
+        # Calcule et stocke la fitness dans chaque route
+        for route in self.population:
+            route._fitness = self.graph.calcul_distance_route(route)
         
-        # Tri par distance croissante (meilleure en premier)
-        fitness.sort(key=lambda x: x[0])
-        self.population = [route for _, route in fitness]
+        # Tri direct avec __lt__ (route1 < route2 si distance1 < distance2)
+        self.population.sort()  # Utilise __lt__ automatiquement !
         
         # Met à jour la meilleure solution globale
-        if fitness and fitness[0][0] < self.meilleure_distance:
-            self.meilleure_distance = fitness[0][0]
-            self.meilleure_route = fitness[0][1]
+        if self.population and self.population[0]._fitness < self.meilleure_distance:
+            self.meilleure_distance = self.population[0]._fitness
+            self.meilleure_route = self.population[0]
             self.iteration_meilleure = self.iteration_courante
     
     def _selection_tournoi(self, taille_tournoi=3):
         """
         Sélection par tournoi: tire K routes aléatoires, retourne la meilleure.
-        Optimisé: pas de calcul de probabilités, O(K).
+        Utilise __lt__ pour comparaison directe.
         """
         taille = min(taille_tournoi, len(self.population))
         candidats = random.sample(self.population, taille)
         
-        # Trouve le meilleur candidat (distance minimale)
-        meilleur = min(candidats, key=lambda r: self.graph.calcul_distance_route(r))
+        # Calcule fitness si nécessaire (pour routes nouvellement créées)
+        for route in candidats:
+            if route._fitness is None:
+                route._fitness = self.graph.calcul_distance_route(route)
+        
+        # Trouve le meilleur candidat avec __lt__ (min utilise < automatiquement !)
+        meilleur = min(candidats)  # Utilise __lt__ !
         return meilleur
     
     def _croisement_ox(self, parent1, parent2):
@@ -830,6 +855,7 @@ class TSP_GA:
                         distance_amelioree = self.graph.calcul_distance_route(route_amelioree)
                         if distance_amelioree < self.meilleure_distance:
                             print(f"  2-opt k-NN amélioration (gen {self.iteration_courante}): {self.meilleure_distance:.2f} → {distance_amelioree:.2f}")
+                            print(f"    Nouvelle meilleure: {route_amelioree}")  # Utilise __repr__ !
                             self.meilleure_distance = distance_amelioree
                             self.meilleure_route = route_amelioree
                             # IMPORTANT: injecter dans la population pour propagation
@@ -904,7 +930,4 @@ if __name__ == "__main__":
     )
 
     tsp_ga.executer(nb_iterations=600, delai_ms=0)
-
-
-
 
